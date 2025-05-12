@@ -23,16 +23,20 @@ app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (X11; Windows; Windows x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.5060.114 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/pdf,text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Referer': 'https://www.bseindia.com/'
 }
 
 PDF_FOLDER = "QuarterlyResultPdf"
 
 # Load Gemini API key from environment variable
-GEMINI_API_KEY = "AIzaSyARFQyj9urbmslrRDu7xCXr92M07ZjZqZw"  # Set this as an environment variable in production
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    logger.error("GEMINI_API_KEY environment variable is not set")
+    raise ValueError("GEMINI_API_KEY environment variable is not set")
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
-
+model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
 # Initialize PDF folder
 try:
@@ -123,7 +127,9 @@ class ScreenerScraper:
         logger.info("Saving links to file for %s", self.stock_name)
         self.save_links_to_file()
         logger.info("Downloading latest PDF for %s", self.stock_name)
-        self.download_latest_pdf()
+        pdf_download_error = self.download_latest_pdf()
+        if pdf_download_error:
+            return {"error": pdf_download_error}
         logger.info("Scraped documents: %s", self.documents)
         return self.documents
 
@@ -140,7 +146,7 @@ class ScreenerScraper:
         pdf_path = os.path.join(PDF_FOLDER, filename)
         if os.path.exists(pdf_path):
             logger.info("Skipping already downloaded file: %s", filename)
-            return
+            return None
         
         session = requests.Session()
         retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
@@ -154,21 +160,22 @@ class ScreenerScraper:
                 for chunk in response.iter_content(1024):
                     pdf_file.write(chunk)
             logger.info("Downloaded: %s", filename)
-        except requests.exceptions.RequestException as e:
+            return None
+        except requests.exceptions.HTTPError as e:
             logger.error("Failed to download %s: %s", filename, str(e))
-            raise
+            return f"Failed to download PDF: {str(e)}"
         except IOError as e:
             logger.error("File system error for %s: %s", filename, str(e))
-            raise
+            return f"File system error: {str(e)}"
 
     def download_latest_pdf(self):
         if not self.documents["quarterly_results"]:
             logger.warning("No quarterly results found to download")
-            return
+            return "No quarterly results found"
         latest_date = list(self.documents["quarterly_results"].keys())[-1]
         url = self.documents["quarterly_results"][latest_date]
         filename = f"{self.stock_name}_{latest_date.replace(' ', '_')}.pdf"
-        self.download_pdf(url, filename)
+        return self.download_pdf(url, filename)
 
     def get_latest_quarterly_result(self):
         json_file = f"{self.stock_name}_documents.json"
@@ -197,7 +204,10 @@ class ScreenerScraper:
         pdf_path, quarter_date = self.get_latest_quarterly_result()
         if not pdf_path or not os.path.exists(pdf_path):
             logger.warning("PDF not found at %s, attempting to re-download", pdf_path)
-            self.download_latest_pdf()
+            error = self.download_latest_pdf()
+            if error:
+                logger.error("Failed to re-download PDF: %s", error)
+                return {"error": error}
             pdf_path, quarter_date = self.get_latest_quarterly_result()
             if not pdf_path or not os.path.exists(pdf_path):
                 logger.error("Latest quarterly result PDF not found at %s", pdf_path)
@@ -349,17 +359,21 @@ def analyze_stock():
         
         logger.info("Scraping documents for %s", stock_name)
         documents = scraper.scrape_documents()
+        if "error" in documents:
+            logger.error("Scraping failed: %s", documents["error"])
+            return jsonify(documents), 400
+        
         logger.info("Scraped documents: %s", documents)
         
         logger.info("Analyzing quarterly result for %s", stock_name)
         result = scraper.analyze_quarterly_result()
         
-        if result:
-            logger.info("Analysis successful for %s", stock_name)
-            return jsonify(result)
-        else:
-            logger.error("Analysis failed for %s", stock_name)
-            return jsonify({'error': 'Analysis failed'}), 500
+        if result and "error" in result:
+            logger.error("Analysis failed: %s", result["error"])
+            return jsonify(result), 400
+        
+        logger.info("Analysis successful for %s", stock_name)
+        return jsonify(result)
 
     except Exception as e:
         logger.exception("Unexpected error in analyze_stock: %s", str(e))
