@@ -25,7 +25,9 @@ CORS(app)  # Enable CORS for all routes
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'application/pdf,text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Referer': 'https://www.bseindia.com/'
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Referer': 'https://www.bseindia.com/',
+    'Connection': 'keep-alive'
 }
 
 PDF_FOLDER = "QuarterlyResultPdf"
@@ -154,15 +156,35 @@ class ScreenerScraper:
         session.mount('https://', HTTPAdapter(max_retries=retries))
         
         try:
+            # Simulate browser navigation
+            logger.info("Fetching BSE India homepage to set cookies")
+            session.get('https://www.bseindia.com', headers=HEADERS, timeout=30)
+            time.sleep(1)
+            # Fetch stock announcement page (approximate URL)
+            bse_stock_url = f"https://www.bseindia.com/stock-share-price/{self.stock_name.lower()}/"
+            logger.info("Fetching BSE stock page: %s", bse_stock_url)
+            session.get(bse_stock_url, headers=HEADERS, timeout=30)
+            time.sleep(1)
+            
+            logger.info("Attempting to download PDF: %s", url)
             response = session.get(url, headers=HEADERS, stream=True, timeout=30)
-            response.raise_for_status()
+            if response.status_code != 200:
+                logger.error("Non-200 response for %s: Status %d, Headers: %s, Content: %s", 
+                            url, response.status_code, response.headers, response.text[:500])
+                return f"Failed to download PDF: {response.status_code} {response.reason}"
+            
             with open(pdf_path, 'wb') as pdf_file:
                 for chunk in response.iter_content(1024):
                     pdf_file.write(chunk)
             logger.info("Downloaded: %s", filename)
             return None
         except requests.exceptions.HTTPError as e:
-            logger.error("Failed to download %s: %s", filename, str(e))
+            logger.error("HTTP error downloading %s: %s, Headers: %s, Content: %s", 
+                        url, str(e), response.headers if 'response' in locals() else {}, 
+                        response.text[:500] if 'response' in locals() else "")
+            return f"Failed to download PDF: {str(e)}"
+        except requests.exceptions.RequestException as e:
+            logger.error("Request error downloading %s: %s", url, str(e))
             return f"Failed to download PDF: {str(e)}"
         except IOError as e:
             logger.error("File system error for %s: %s", filename, str(e))
